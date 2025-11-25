@@ -1,255 +1,195 @@
-"""Streamlit app for Bolita Cubana - improved.
-Loads historico_bolita_MASTER.csv and model files, shows results from CSV,
-allows running the Actualiza csv.py updater (in-memory), and runs predictions
-without manual input using the trained Keras model and preprocessing objects.
-"""
 import streamlit as st
-from pathlib import Path
 import pandas as pd
 import numpy as np
-import joblib
-import subprocess
-import sys
-from typing import Optional, Dict, Any
+import joblib 
+from tensorflow.keras.models import load_model
 
-BASE_DIR = Path(__file__).parent
-st.set_page_config(page_title="Bolita Cubana Play Creator — Mejorada", layout="wide")
+# ----------------------------------------------------------------------------------
+# PARTE 1: DEFINICIÓN DE LAS FUNCIONES (Mover funciones auxiliares)
+# ----------------------------------------------------------------------------------
 
-# ------------------ Loading utilities with caching ------------------
-@st.cache_data(ttl=3600, show_spinner=False)
-def load_historical(csv_path: Path) -> Optional[pd.DataFrame]:
-    if not csv_path.exists():
-        return None
-    df = pd.read_csv(csv_path, low_memory=False)
-    # Normalize column names
-    df.columns = [c.strip() for c in df.columns]
-    # Ensure Fecha column exists and is datetime
-    if "Fecha" in df.columns:
-        df["Fecha"] = pd.to_datetime(df["Fecha"], errors="coerce")
-    # Remove rows without Fecha
-    df = df.dropna(subset=["Fecha"]) if "Fecha" in df.columns else df
-    # Sort
-    if "Fecha" in df.columns and "Horario" in df.columns:
-        df = df.sort_values(by=["Fecha", "Horario"])
-    return df
-
-@st.cache_resource(show_spinner=False)
-def load_keras_model(h5_path: Path):
-    if not h5_path.exists():
-        return None
+# 1. FUNCIÓN DE CARGA CRÍTICA CON CACHÉ
+# Usar st.cache_resource para cargar el modelo y transformadores una sola vez.
+# Esto es CRÍTICO, ya que load_model es una operación costosa.
+@st.cache_resource
+def load_critical_files():
     try:
-        from tensorflow.keras.models import load_model
-        model = load_model(str(h5_path))
-        return model
+        bolitero_model = load_model('bolitero_nivel_dios_model.h5')
+        scaler = joblib.load('minmax_scaler.pkl')
+        encoder = joblib.load('onehot_encoder.pkl')
+        # NOTA: Cargar el CSV directamente en la función principal para permitir su actualización
+        return bolitero_model, scaler, encoder
     except Exception as e:
-        st.warning(f"No se pudo cargar modelo Keras ({h5_path.name}): {e}")
-        return None
+        st.error(f"❌ ERROR: Fallo al cargar archivos críticos (modelo/transformadores). Asegúrate de que estén en la misma carpeta. Error: {e}")
+        return None, None, None
 
-@st.cache_resource(show_spinner=False)
-def load_joblib(path: Path):
-    if not path.exists():
-        return None
-    try:
-        return joblib.load(path)
-    except Exception as e:
-        st.warning(f"No se pudo cargar {path.name}: {e}")
-        return None
-
-# ------------------ Prediction helpers (adapted from your script) ------------------
-SEQUENCE_LENGTH = 7
-NUMERICAL_FEATURES = ["Centena", "Fijo", "Corrido_1", "Corrido_2"]
-CATEGORICAL_FEATURES = ["Estado", "Horario"]
-
-# Map of game order — adjust if your dataset uses different codes
-SEQUENCE_MAP = {
-    ("GA", "Midday"): ("FL", "Midday"),
-    ("FL", "Midday"): ("NY", "Midday"),
-    ("NY", "Midday"): ("GA", "Evening"),
-    ("GA", "Evening"): ("FL", "Evening"),
-    ("FL", "Evening"): ("NY", "Evening"),
-    ("NY", "Evening"): ("GA", "Night"),
-    ("GA", "Night"): ("GA", "Midday"),
-}
-
-def obtener_proximo_sorteo(ultimo_estado, ultimo_horario):
-    return SEQUENCE_MAP.get((ultimo_estado, ultimo_horario), (None, None))
-
+# 2. FUNCIÓN DE SECUENCIACIÓN (Igual que antes)
 def prepare_latest_sequence(df_master, sequence_length, scaler_num, encoder_cat):
+    # ... (El código de tu función 'prepare_latest_sequence' va aquí, sin cambios)
     df_sequence = df_master.tail(sequence_length).copy()
-    if len(df_sequence) < sequence_length:
-        raise ValueError("No hay suficientes sorteos históricos para preparar la secuencia.")
-    # Transform numerical
-    X_num = df_sequence[NUMERICAL_FEATURES].copy()
-    if scaler_num is not None:
-        X_num = scaler_num.transform(X_num)
-    # Encode categorical
-    X_cat = None
-    if encoder_cat is not None:
-        enc = encoder_cat.transform(df_sequence[CATEGORICAL_FEATURES])
-        enc_df = pd.DataFrame(enc, columns=encoder_cat.get_feature_names_out(CATEGORICAL_FEATURES))
-        X_cat = enc_df.values
-    # Combine
-    if X_cat is not None:
-        X_full = np.hstack([X_num, X_cat])
-    else:
-        X_full = X_num
-    X_input = X_full.reshape(1, sequence_length, X_full.shape[1])
+    numerical_features = ['Centena', 'Fijo', 'Corrido_1', 'Corrido_2']
+    categorical_features = ['Estado', 'Horario']
+    
+    df_sequence[numerical_features] = scaler_num.transform(df_sequence[numerical_features])
+    encoded_features = encoder_cat.transform(df_sequence[categorical_features])
+    encoded_df = pd.DataFrame(encoded_features, columns=encoder_cat.get_feature_names_out(categorical_features))
+    
+    df_processed = df_sequence.drop(categorical_features + ['Fecha'], axis=1).reset_index(drop=True)
+    # Aquí puedes necesitar hacer un reset_index() en encoded_df si el encoder devuelve un array de numpy
+    # Vamos a asumir que el encoder devuelve algo compatible para concatenar:
+    df_processed = pd.concat([df_processed, encoded_df], axis=1) 
+    
+    # Asegurarse de que el orden de las columnas sea el esperado por el modelo
+    # El modelo espera todas las columnas excepto 'Fijo'. Vamos a extraer el orden del encoder si es posible
+    # Si da error en la línea anterior, revisa el formato de 'encoded_df'
+    column_order = [col for col in df_processed.columns if col != 'Fijo']
+    X_sequence = df_processed[column_order].values # Asegurar orden de las columnas
+    X_input = X_sequence.reshape(1, sequence_length, X_sequence.shape[1])
+    
     return X_input
 
-def generar_jugada_estrategica_pro(model, latest_sequence, prob_objetivo=0.80, max_numeros=20):
-    predictions = model.predict(latest_sequence)
-    try:
-        fijo_probs = predictions[0][0]
-    except Exception:
-        fijo_probs = np.array(predictions[0]).ravel()
-    fijo_ranking_indices = np.argsort(fijo_probs)[::-1]
+# 3. FUNCIÓN DE DEDUCCIÓN DEL SORTEO OBJETIVO (Igual que antes)
+def obtener_proximo_sorteo(ultimo_estado, ultimo_horario):
+    # ... (El código de tu función 'obtener_proximo_sorteo' va aquí, sin cambios)
+    secuencia_de_juego = {
+        ('GA', 'Night'): ('TN', 'Morning'),
+        ('TN', 'Morning'): ('GA', 'Midday'),
+        ('GA', 'Midday'): ('NJ', 'Midday'),
+        ('NJ', 'Midday'): ('FL', 'Midday'),
+        ('FL', 'Midday'): ('NY', 'Midday'),
+        ('NY', 'Midday'): ('GA', 'Evening'),
+        ('GA', 'Evening'): ('FL', 'Evening'),
+        ('FL', 'Evening'): ('NY', 'Evening'),
+        ('NY', 'Evening'): ('NJ', 'Evening'),
+        ('NJ', 'Evening'): ('GA', 'Night'),
+    }
+    return secuencia_de_juego.get((ultimo_estado, ultimo_horario), ('ERROR', 'REVISAR'))
 
+# 4. FUNCIÓN DE JUGADA ESTRATÉGICA PRO (Igual que antes)
+def generar_jugada_estrategica_pro(model, latest_sequence, prob_objetivo=0.80, max_numeros=20):
+    # ... (El código de tu función 'generar_jugada_estrategica_pro' va aquí, sin cambios)
+    predictions = model.predict(latest_sequence, verbose=0) # Añadir verbose=0 para Streamlit
+    fijo_probs = predictions[0][0] 
+    fijo_ranking_indices = np.argsort(fijo_probs)[::-1] 
+    
     jugada_fijo_duro = []
     probabilidad_acumulada = 0.0
-
+    
     for idx in fijo_ranking_indices:
-        prob = float(fijo_probs[idx])
-        jugada_fijo_duro.append(int(idx))
+        prob = fijo_probs[idx]
+        jugada_fijo_duro.append(idx)
         probabilidad_acumulada += prob
+
         if probabilidad_acumulada >= prob_objetivo and len(jugada_fijo_duro) >= 10:
-            break
+             break
+    
+    top_terminal = np.argmax(predictions[1][0])
+    top_decena = np.argmax(predictions[2][0])
 
-    top_terminal = int(np.argmax(predictions[1][0])) if len(predictions) > 1 else None
-    top_decena = int(np.argmax(predictions[2][0])) if len(predictions) > 2 else None
+    top_fijos_parlet = sorted(jugada_fijo_duro[:5], key=lambda x: fijo_probs[x], reverse=True) 
 
-    top_fijos_parlet = [f for f in jugada_fijo_duro[:5]]
     parlet_plan = []
     for i in range(len(top_fijos_parlet)):
         for j in range(i + 1, len(top_fijos_parlet)):
             parlet_plan.append(f"{top_fijos_parlet[i]:02d} x {top_fijos_parlet[j]:02d}")
-    if top_fijos_parlet and (top_decena is not None or top_terminal is not None):
+    
+    if top_fijos_parlet:
         parlet_plan.append(f"COBERTURA DURA: {top_fijos_parlet[0]:02d} x D{top_decena} o T{top_terminal}")
-
+    
     plan_de_juego = {
-        "Probabilidad Acumulada (ROI)": f"{min(probabilidad_acumulada * 100, 100):.2f} %",
-        "Fijos (Top 10)": [f"{n:02d}" for n in jugada_fijo_duro[:10]],
-        "Fijos (Cobertura)": [f"{n:02d}" for n in jugada_fijo_duro[10:]],
-        "Total de Números Únicos": len(jugada_fijo_duro),
-        "Plan Parlet": parlet_plan,
-        "Top Terminal": top_terminal,
-        "Top Decena": top_decena,
+        "🎯 Sorteo a Predecir": "Placeholder", 
+        "🎯 Probabilidad Acumulada (ROI):": f"{min(probabilidad_acumulada * 100, 100):.2f}%",
+        "🛑 Fijos (Duro - Top 10):": [f"{n:02d}" for n in jugada_fijo_duro[:10]], 
+        "🟢 Fijos (Cobertura):": [f"{n:02d}" for n in jugada_fijo_duro[10:]], 
+        "Total de Números Únicos:": len(jugada_fijo_duro),
+        "⭐ Estrategia de Parlet (Dos de Tres):": "\n".join(parlet_plan),
+        "💡 Cobertura Extra (Jugada de Ventaja):": f"Jugar T{top_terminal} y D{top_decena} por separado."
     }
+    
     return plan_de_juego
 
-# ------------------ App UI ------------------
-def run_updater_script(script_path: Path) -> Dict[str, Any]:
-    """Run Actualiza csv.py in a subprocess and return status. Updates in-container CSV only."""
-    if not script_path.exists():
-        return {"ok": False, "error": f"Script no encontrado: {script_path}"}
-    try:
-        completed = subprocess.run([sys.executable, str(script_path)], capture_output=True, text=True, timeout=300)
-        return {"ok": completed.returncode == 0, "stdout": completed.stdout, "stderr": completed.stderr}
-    except Exception as e:
-        return {"ok": False, "error": str(e)}
+# ----------------------------------------------------------------------------------
+# PARTE 2: FUNCIÓN PRINCIPAL DE STREAMLIT
+# ----------------------------------------------------------------------------------
 
 def main():
-    st.title("Bolita Cubana Play Creator — Mejorada")
-    csv_path = BASE_DIR / "historico_bolita_MASTER.csv"
-    model_h5 = BASE_DIR / "bolitero_nivel_dios_model.h5"
-    scaler_pkl = BASE_DIR / "minmax_scaler.pkl"
-    encoder_pkl = BASE_DIR / "onehot_encoder.pkl"
+    st.set_page_config(page_title="Bolitero Nivel Dios", layout="wide")
+    st.title("🔥 PLAN DE JUEGO BOLITERO NIVEL DIOS 🔥")
+    st.markdown("---")
+    
+    SEQUENCE_LENGTH = 7 
 
-    df = load_historical(csv_path)
-    keras_model = load_keras_model(model_h5)
-    scaler = load_joblib(scaler_pkl)
-    encoder = load_joblib(encoder_pkl)
+    # 1. CARGAR ARCHIVOS CRÍTICOS (Usando la función de caché)
+    bolitero_model, scaler, encoder = load_critical_files()
 
-    st.sidebar.header("Controles")
-    if st.sidebar.button("Actualizar CSV (ejecutar Actualiza csv.py)"):
-        with st.spinner("Ejecutando actualizador... esto puede tardar segundos"):
-            res = run_updater_script(BASE_DIR / "Actualiza csv.py")
-            if res.get("ok"):
-                try:
-                    load_historical.clear()
-                except Exception:
-                    pass
-                st.sidebar.success("Actualizador ejecutado. Recargando datos...")
-                df = load_historical(csv_path)
-            else:
-                st.sidebar.error("Falló el actualizador. Revisa el log abajo.")
-                st.sidebar.text(res.get("stderr") or res.get("error"))
+    if bolitero_model is None:
+        st.stop() # Detener la ejecución si falla la carga del modelo/transformadores
 
-    tabs = st.tabs(["Resultados", "Predicción (Automática)", "Historial"])
+    # 2. CARGAR Y PREPARAR DATOS (Usar @st.cache_data para el CSV si es grande)
+    # Por ahora, se carga en cada ejecución, pero si el CSV no cambia a menudo, usa @st.cache_data
+    try:
+        df_actualizado = pd.read_csv('historico_bolita_MASTER.csv')
+        df_actualizado = df_actualizado.sort_values(by=['Fecha', 'Horario'], ascending=True)
+        # Mostrar el último sorteo procesado
+        ultima_fila = df_actualizado.iloc[-1] 
+        ultimo_estado = ultima_fila['Estado']
+        ultimo_horario = ultima_fila['Horario']
+        ultima_fecha = ultima_fila['Fecha']
+        
+        st.info(f"✅ Datos cargados. Último Sorteo Procesado: **{ultimo_estado} {ultimo_horario}** del **{ultima_fecha}**.")
+    except Exception as e:
+        st.error(f"❌ ERROR: Fallo al cargar el archivo de datos 'historico_bolita_MASTER.csv'. Error: {e}")
+        return
 
-    # --- Resultados tab ---
-    with tabs[0]:
-        st.header("Resultados — usar CSV histórico")
-        if df is None or df.empty:
-            st.warning("No se encontró o CSV histórico está vacío. Ejecuta el actualizador o sube el CSV.")
-        else:
-            df['Estado'] = df['Estado'].astype(str)
-            df['Horario'] = df['Horario'].astype(str)
-            combos = df.groupby(['Estado', 'Horario']).size().reset_index()[['Estado', 'Horario']]
-            combo_labels = [f"{e} | {h}" for e, h in zip(combos['Estado'], combos['Horario'])]
-            choice = st.selectbox("Selecciona Lotería (Estado | Horario)", options=combo_labels)
-            sel_estado, sel_horario = [x.strip() for x in choice.split("|")]
+    # 3. BOTÓN DE PREDICCIÓN
+    if st.button("🔮 Generar Jugada Estratégica", type="primary"):
+        with st.spinner('Analizando secuencia y generando la predicción...'):
+            # IDENTIFICAR EL SORTEO OBJETIVO
+            proximo_estado, proximo_horario = obtener_proximo_sorteo(ultimo_estado, ultimo_horario)
+            
+            # GENERAR LA PREDICCIÓN
+            latest_sequence_input = prepare_latest_sequence(df_actualizado, SEQUENCE_LENGTH, scaler, encoder) 
+            plan_de_jugada = generar_jugada_estrategica_pro(bolitero_model, latest_sequence_input)
 
-            df_lottery = df[(df['Estado'] == sel_estado) & (df['Horario'] == sel_horario)].copy()
-            if df_lottery.empty:
-                st.warning("No hay registros para esa combinación.")
-            else:
-                min_date = df_lottery['Fecha'].min().date()
-                max_date = df_lottery['Fecha'].max().date()
-                selected_date = st.date_input("Selecciona fecha", value=max_date, min_value=min_date, max_value=max_date)
-                chosen_rows = df_lottery[df_lottery['Fecha'].dt.date == selected_date]
-                if chosen_rows.empty:
-                    st.info("No hay resultado exacto para esa fecha. Mostrando el último disponible antes de la fecha seleccionada.")
-                    chosen_rows = df_lottery[df_lottery['Fecha'].dt.date <= selected_date].tail(1)
-                st.subheader("Resultado")
-                st.table(chosen_rows.reset_index(drop=True))
+            # ACTUALIZAR EL REPORTE CON EL SORTEO OBJETIVO
+            plan_de_jugada['🎯 Sorteo a Predecir'] = f"**{proximo_estado} {proximo_horario}** del **{ultima_fecha}** (Día siguiente o siguiente horario)"
 
-    # --- Prediction tab ---
-    with tabs[1]:
-        st.header("Predicción automática (sin inputs manuales)")
-        st.write("La predicción trabaja con la última secuencia histórica y determina el siguiente sorteo objetivo.")
-        if df is None or df.empty:
-            st.warning("No hay historial para predecir. Ejecuta el actualizador o sube el CSV.")
-        elif keras_model is None:
-            st.warning("No se detectó modelo Keras en la raíz (bolitero_nivel_dios_model.h5). Sin predicción.")
-        else:
-            st.write(f"Historial disponible: {len(df)} filas. Último registro: {df['Fecha'].max()}")
-            if st.button("Generar predicción automática"):
-                try:
-                    latest_row = df.iloc[-1]
-                    ultimo_estado = latest_row['Estado']
-                    ultimo_horario = latest_row['Horario']
-                    ultima_fecha = latest_row['Fecha']
-                    proximo_estado, proximo_horario = obtener_proximo_sorteo(ultimo_estado, ultimo_horario)
-                    X_input = prepare_latest_sequence(df, SEQUENCE_LENGTH, scaler, encoder)
-                    plan = generar_jugada_estrategica_pro(keras_model, X_input)
-                    plan['Sorteo objetivo'] = f"{proximo_estado} {proximo_horario} del {ultima_fecha.date()}"
-                    st.success("Predicción generada")
-                    st.json(plan)
-                except Exception as e:
-                    st.error(f"Error generando predicción: {e}")
+            # 4. MOSTRAR EL PLAN FINAL EN PANELES
+            st.success(f"🎉 **¡PLAN GENERADO!** Esta predicción es para: {plan_de_jugada['🎯 Sorteo a Predecir']}")
+            st.markdown("---")
 
-    # --- Historial tab ---
-    with tabs[2]:
-        st.header("Historial completo")
-        if df is None or df.empty:
-            st.warning("No hay CSV histórico cargado.")
-            uploaded = st.file_uploader("Sube un CSV de historiales (temporal)", type=["csv"])
-            if uploaded:
-                udf = pd.read_csv(uploaded)
-                st.dataframe(udf.head(200))
-        else:
-            st.dataframe(df)
-            st.download_button("Descargar CSV", df.to_csv(index=False), file_name="historico_bolita_MASTER_export.csv")
+            col1, col2 = st.columns([1, 1])
 
-    # Sidebar quick info
-    st.sidebar.markdown("---")
-    st.sidebar.write({
-        "CSV existe": csv_path.exists(),
-        "Modelo Keras": model_h5.exists(),
-        "Scaler": scaler_pkl.exists(),
-        "Encoder": encoder_pkl.exists(),
-        "Filas historial": len(df) if df is not None else 0,
-    })
+            # Columna 1: Fijos y ROI
+            with col1:
+                st.subheader("🎯 Fijos y Potencial de Retorno (ROI)")
+                st.metric(label="Probabilidad Acumulada (ROI)", 
+                          value=plan_de_jugada["🎯 Probabilidad Acumulada (ROI):"])
+                st.write(f"Total de Números Únicos: **{plan_de_jugada['Total de Números Únicos:']}**")
+                
+                st.markdown("### 🛑 Fijos (Juego Duro - Top 10)")
+                # Muestra los números en un formato de grilla para mejor visualización
+                fijos_duros = plan_de_jugada['🛑 Fijos (Duro - Top 10):']
+                st.code(", ".join(fijos_duros))
+
+                if plan_de_jugada['🟢 Fijos (Cobertura):']:
+                    st.markdown("### 🟢 Fijos (Cobertura Extra)")
+                    fijos_cobertura = plan_de_jugada['🟢 Fijos (Cobertura):']
+                    st.code(", ".join(fijos_cobertura))
+
+            # Columna 2: Estrategia de Parlet y Cobertura
+            with col2:
+                st.subheader("⭐ Estrategia de Parlet y Cobertura")
+                st.markdown("### Estrategia de Parlet (Dos de Tres)")
+                # Usar st.markdown con un listado o st.text
+                for parlet in plan_de_jugada["⭐ Estrategia de Parlet (Dos de Tres):"].split('\n'):
+                    st.write(f"- {parlet}")
+                
+                st.markdown("### 💡 Cobertura de Ventaja")
+                st.info(plan_de_jugada["💡 Cobertura Extra (Jugada de Ventaja):"])
+            
+            st.markdown("---")
+            st.dataframe(df_actualizado.tail(SEQUENCE_LENGTH + 1)) # Mostrar la secuencia usada para la predicción
 
 if __name__ == '__main__':
     main()
