@@ -1,13 +1,11 @@
-# Requirements for the Bola project
-# Cleaned: no trailing spaces, one package per line, upper bounds to avoid incompatible upgrades
-
 streamlit>=1.24.0,<2.0
-pandas>=1.5.3,<2.0
-numpy>=1.24.0,<2.1
-scikit-learn>=1.2.2,<2.0
-joblib>=1.2.0,<2.0
-requests>=2.31.0,<3.0
-beautifulsoup4>=4.12.2,<5.0
-lxml>=4.9.1,<5.0
-tensorflow-cpu>=2.12.0,<2.13
-python-dotenv>=1.0.0,<2.0
+pandas>=2.0.0
+numpy>=2.0.0
+scikit-learn>=1.2.2
+joblib>=1.2.0
+requests>=2.31.0
+beautifulsoup4>=4.12.2
+lxml>=4.9.1
+tensorflow==2.20.0
+python-dotenv>=1.0.0
+h5py>=3.15.0
