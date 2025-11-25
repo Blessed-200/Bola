@@ -17,7 +17,7 @@ st.set_page_config(
 TARGET_DRAWS = [('GA', 'Midday'), ('FL', 'Midday'), ('NY', 'Midday'), 
                 ('GA', 'Evening'), ('FL', 'Evening'), ('NY', 'Evening'), 
                 ('GA', 'Night')]
-SEQUENCE_LENGTH = 14
+SEQUENCE_LENGTH = 5
 categorical_features = ['Estado', 'Horario']
 
 # ----------------------------------------------------------------------------------
