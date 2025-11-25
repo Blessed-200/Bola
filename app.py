@@ -149,11 +149,12 @@ with tab_dashboard:
         del `historico_bolita_MASTER.csv` a tu repositorio de GitHub.
         """)
     
-    if st.button("Actualizar y Recargar Base de Datos desde GitHub"):
+        if st.button("Actualizar y Recargar Base de Datos desde GitHub"):
         # Forzar a Streamlit a limpiar su caché y recargar los datos
-        load_assets.clear()
-        st.experimental_rerun()
-        # Nota: La recarga real ocurre al llamar a load_assets() de nuevo.
+        st.cache_resource.clear() # La forma moderna de limpiar el caché
+        st.rerun() # LA FUNCIÓN CORREGIDA
+        st.toast("✅ Base de datos recargada. Confirma el cambio de fecha máxima.")
+
 
     st.divider()
 
